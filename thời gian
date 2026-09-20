@@ -1,0 +1,361 @@
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+
+#define SDA_PIN 8
+#define SCL_PIN 9
+#define BTN_1_PIN 4 // Nút 1 (Chân 4)
+#define BTN_2_PIN 5 // Nút 2 (Chân 5)
+
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+// --- CHẾ ĐỘ MÀN HÌNH ---
+enum AppMode {
+  MODE_BOOT,
+  MODE_MENU,
+  MODE_GAME,
+  MODE_STOPWATCH
+};
+
+AppMode currentMode = MODE_BOOT;
+bool showMiniTable = false; // Trạng thái hiển thị Bảng Nút Bé
+
+// --- BITMAPS ---
+// 1. Logo Android (32x32 pixel)
+const uint8_t android_logo_bmp[] PROGMEM = {
+  0x00, 0x10, 0x08, 0x00,
+  0x00, 0x28, 0x14, 0x00,
+  0x00, 0x50, 0x0a, 0x00,
+  0x00, 0xa0, 0x05, 0x00,
+  0x01, 0xf0, 0x0f, 0x80,
+  0x07, 0xff, 0xff, 0xe0,
+  0x0f, 0xff, 0xff, 0xf0,
+  0x1e, 0x3c, 0x3c, 0x78,
+  0x1e, 0x3c, 0x3c, 0x78,
+  0x3f, 0xff, 0xff, 0xfc,
+  0x3f, 0xff, 0xff, 0xfc,
+  0x00, 0x00, 0x00, 0x00,
+  0x1c, 0x7f, 0xfe, 0x38,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c,
+  0x1c, 0x7f, 0xfe, 0x38,
+  0x00, 0x7f, 0xfe, 0x00,
+  0x00, 0x3f, 0xfc, 0x00,
+  0x00, 0x1e, 0x78, 0x00,
+  0x00, 0x1e, 0x78, 0x00,
+  0x00, 0x1e, 0x78, 0x00,
+  0x00, 0x1e, 0x78, 0x00,
+  0x00, 0x0c, 0x30, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00
+};
+
+// 2. Khủng long
+const uint8_t dino_bmp[] PROGMEM = {
+  0x00, 0x00, 0x80, 0x7f, 0x80, 0xb7, 0x80, 0xff,
+  0x80, 0xff, 0x80, 0x07, 0x00, 0x1f, 0xf0, 0x3f,
+  0xf0, 0x3f, 0xf0, 0x1f, 0xe0, 0x0f, 0xc0, 0x07,
+  0x80, 0x05, 0x80, 0x04, 0x00, 0x0c, 0x00, 0x08
+};
+
+// 3. Xương rồng
+const uint8_t cactus_bmp[] PROGMEM = {
+  0x06, 0x00, 0x0d, 0x80, 0x0d, 0x80, 0x6d, 0xb0, 0x6d, 0xb0, 0x6d, 0xb0, 0x7f, 0xf0, 0x0d, 0x80,
+  0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80
+};
+
+// --- BẤM GIỜ & GAME ---
+unsigned long accumulatedTime = 0;
+unsigned long timerStartMark = 0;
+bool timerRunning = false;
+char timerStr[16] = "00:00:00:0";
+
+const int GROUND_Y = 46;
+int dinoY = GROUND_Y;
+float dinoVel = 0;
+bool isJumping = false;
+float cactusX = 128;
+
+// TỐC ĐỘ CỐ ĐỊNH (Bạn có thể đổi số 3.0 thành 2.5 nếu muốn chậm hơn nữa)
+const float FIXED_SPEED = 3.0; 
+int score = 0;
+bool gameOver = false;
+
+// --- CẤU TRÚC PHÍM BẤM ---
+struct Button {
+  uint8_t pin;
+  bool lastState;
+  unsigned long pressStartTime;
+  bool shortPressed;
+  bool longPressed;
+  bool longHandled;
+};
+
+Button btn1 = {BTN_1_PIN, HIGH, 0, false, false, false};
+Button btn2 = {BTN_2_PIN, HIGH, 0, false, false, false};
+
+void updateButton(Button &btn) {
+  bool reading = digitalRead(btn.pin);
+  btn.shortPressed = false;
+  btn.longPressed = false;
+
+  if (reading != btn.lastState) {
+    if (reading == LOW) {
+      btn.pressStartTime = millis();
+      btn.longHandled = false;
+    } else {
+      if (!btn.longHandled && (millis() - btn.pressStartTime >= 35) && (millis() - btn.pressStartTime < 1000)) {
+        btn.shortPressed = true;
+      }
+    }
+  }
+
+  if (reading == LOW && !btn.longHandled) {
+    if (millis() - btn.pressStartTime >= 1000) { // Giữ 1 giây
+      btn.longPressed = true;
+      btn.longHandled = true;
+    }
+  }
+
+  btn.lastState = reading;
+}
+
+// --- HÀM BẤM GIỜ ---
+void startOrPauseTimer() {
+  if (timerRunning) {
+    accumulatedTime += (millis() - timerStartMark);
+    timerRunning = false;
+  } else {
+    timerStartMark = millis();
+    timerRunning = true;
+  }
+}
+
+void resetTimer() {
+  accumulatedTime = 0;
+  timerStartMark = millis();
+}
+
+void updateTimerString() {
+  unsigned long currentElapsed = accumulatedTime;
+  if (timerRunning) {
+    currentElapsed += (millis() - timerStartMark);
+  }
+
+  unsigned long tenths = (currentElapsed / 100) % 10;
+  unsigned long totalSecs = currentElapsed / 1000;
+  unsigned long secs = totalSecs % 60;
+  unsigned long totalMins = totalSecs / 60;
+  unsigned long mins = totalMins % 60;
+  unsigned long hours = totalMins / 60;
+
+  snprintf(timerStr, sizeof(timerStr), "%02lu:%02lu:%02lu:%1lu", hours, mins, secs, tenths);
+}
+
+void resetGame() {
+  dinoY = GROUND_Y;
+  dinoVel = 0;
+  isJumping = false;
+  cactusX = 128;
+  score = 0;
+  gameOver = false;
+}
+
+// --- VẼ BẢNG BÉ HƯỚNG DẪN NÚT (MINI TABLE POPUP) ---
+void drawMiniTableOverlay() {
+  u8g2.setDrawColor(0);
+  u8g2.drawBox(8, 4, 112, 56);
+
+  u8g2.setDrawColor(1);
+  u8g2.drawFrame(8, 4, 112, 56);
+
+  u8g2.setFont(u8g2_font_micro_tr);
+  u8g2.drawStr(28, 12, "BANG CHE DO NUT");
+  u8g2.drawHLine(8, 15, 112);
+
+  u8g2.drawHLine(8, 28, 112);
+  u8g2.drawHLine(8, 41, 112);
+  u8g2.drawVLine(48, 15, 45);
+
+  u8g2.drawStr(12, 24, "N4 Ngan");  u8g2.drawStr(52, 24, "Nhay / Run");
+  u8g2.drawStr(12, 37, "N5 Ngan");  u8g2.drawStr(52, 37, "Reset/Pause");
+  u8g2.drawStr(12, 50, "Giu N1/2"); u8g2.drawStr(52, 50, "Mode / Home");
+}
+
+// --- KHỞI ĐỘNG: REDMAGIC TRƯỚC -> LOGO ANDROID SAU ---
+void runBootAnimation() {
+  // 1. Màn hình 1: Hiện chữ REDMAGIC
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  u8g2.drawStr(10, 40, "REDMAGIC");
+  u8g2.sendBuffer();
+  delay(1500);
+
+  // 2. Màn hình 2: Hiện Logo Android
+  u8g2.clearBuffer();
+  u8g2.drawXBMP(12, 16, 32, 32, android_logo_bmp);
+  u8g2.setFont(u8g2_font_7x14_tr);
+  u8g2.drawStr(52, 32, "REDMAGIC");
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(52, 44, "Android Ed.");
+  u8g2.sendBuffer();
+  delay(1800);
+
+  currentMode = MODE_MENU;
+}
+
+void setup() {
+  pinMode(BTN_1_PIN, INPUT_PULLUP);
+  pinMode(BTN_2_PIN, INPUT_PULLUP);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  u8g2.begin();
+  u8g2.setBusClock(800000);
+
+  runBootAnimation();
+}
+
+void loop() {
+  updateButton(btn1);
+  updateButton(btn2);
+  updateTimerString();
+
+  // --- NẤN GIỮ NÚT ĐỂ CHUYỂN MODE HẶC VỀ HOME ---
+  if (btn2.longPressed) {
+    showMiniTable = false;
+    currentMode = MODE_MENU; // Quay về Menu
+  }
+
+  if (btn1.longPressed) {
+    showMiniTable = false;
+    if (currentMode == MODE_GAME) currentMode = MODE_STOPWATCH;
+    else {
+      currentMode = MODE_GAME;
+      resetGame();
+    }
+  }
+
+  // --- 1. MÀN HÌNH MENU CHÍNH ---
+  if (currentMode == MODE_MENU) {
+    if (btn1.shortPressed) {
+      if (showMiniTable) showMiniTable = false;
+      else { currentMode = MODE_GAME; resetGame(); }
+    }
+    if (btn2.shortPressed) {
+      showMiniTable = !showMiniTable; // Bật / Tắt Bảng Bé
+    }
+
+    u8g2.clearBuffer();
+    u8g2.drawXBMP(6, 12, 32, 32, android_logo_bmp);
+    
+    u8g2.setFont(u8g2_font_7x14_tr);
+    u8g2.drawStr(44, 18, "REDMAGIC");
+
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(44, 30, "N4: Choi Game");
+    u8g2.drawStr(44, 40, "N5: Bang Nut Be");
+    u8g2.drawStr(44, 50, "Giu N1/2: Mode/Home");
+
+    u8g2.drawHLine(0, 63, 128);
+
+    if (showMiniTable) drawMiniTableOverlay();
+
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // --- 2. CHẾ ĐỘ BẤM GIỜ ---
+  if (currentMode == MODE_STOPWATCH) {
+    if (btn1.shortPressed) startOrPauseTimer();
+    if (btn2.shortPressed) resetTimer();
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(24, 12, "REDMAGIC TIMER");
+
+    u8g2.setFont(u8g2_font_10x20_tr);
+    u8g2.setCursor(14, 38);
+    u8g2.print(timerStr);
+
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.setCursor(20, 54);
+    if (timerRunning) u8g2.print("[ DANG CHAY... ]");
+    else u8g2.print("[ TAM DUNG ]");
+
+    u8g2.drawStr(0, 64, "N4:Chay/Dung | N5:Reset");
+
+    if (showMiniTable) drawMiniTableOverlay();
+
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // --- 3. CHẾ ĐỘ GAME (TỐC ĐỘ CỐ ĐỊNH) ---
+  if (currentMode == MODE_GAME) {
+    if (gameOver) {
+      if (btn1.shortPressed || btn2.shortPressed) resetGame();
+
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(32, 16, "GAME OVER");
+      
+      u8g2.setCursor(10, 36); u8g2.print("Diem dat duoc: "); u8g2.print(score);
+      u8g2.setCursor(10, 52); u8g2.print("Thoi gian: "); u8g2.print(timerStr);
+      
+      if (showMiniTable) drawMiniTableOverlay();
+      u8g2.sendBuffer();
+      return;
+    }
+
+    if (btn1.shortPressed && !isJumping) {
+      dinoVel = -5.2;
+      isJumping = true;
+    }
+
+    if (btn2.shortPressed) startOrPauseTimer();
+
+    // Vật lý nhảy
+    dinoY += dinoVel;
+    dinoVel += 0.45;
+    if (dinoY >= GROUND_Y) {
+      dinoY = GROUND_Y;
+      isJumping = false;
+    }
+
+    // Tốc độ di chuyển xương rồng giữ nguyên hằng số
+    cactusX -= FIXED_SPEED;
+    if (cactusX < -12) {
+      cactusX = 128;
+      score++; // Tăng điểm nhưng KHÔNG tăng tốc độ nữa
+    }
+
+    // Va chạm
+    if (10 + 12 > cactusX && 10 < cactusX + 10 && dinoY + 14 > 48) {
+      gameOver = true;
+    }
+
+    // Vẽ Màn hình Game
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_micro_tr);
+    u8g2.drawStr(0, 8, "REDMAGIC");
+    u8g2.setCursor(48, 8); u8g2.print("S:"); u8g2.print(score);
+    u8g2.setCursor(78, 8); u8g2.print(timerStr);
+
+    u8g2.drawHLine(0, 10, 128);
+    u8g2.drawHLine(0, 62, 128);
+    u8g2.drawXBMP(10, dinoY, 16, 16, dino_bmp);
+    u8g2.drawXBMP((int)cactusX, 48, 12, 14, cactus_bmp);
+
+    if (showMiniTable) drawMiniTableOverlay();
+
+    u8g2.sendBuffer();
+    delay(10);
+  }
+}
