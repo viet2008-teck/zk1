@@ -1,0 +1,551 @@
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <RF24.h>
+
+// ==========================================
+// 1. CẤU HÌNH CHÂN CHO ESP32-S3 (N16R8)
+// ==========================================
+#define SDA_PIN     8
+#define SCL_PIN     9
+#define BTN_1_PIN   4  // Nút 4
+#define BTN_2_PIN   5  // Nút 5
+
+#define NRF_CE_PIN   1
+#define NRF_CSN_PIN  2
+#define SPI_SCK      6
+#define SPI_MISO     7
+#define SPI_MOSI     15
+
+// Khởi tạo Màn hình OLED & NRF24
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+SPIClass fspi(FSPI);
+RF24 radio(NRF_CE_PIN, NRF_CSN_PIN);
+
+// ==========================================
+// 2. CHẾ ĐỘ MÀN HÌNH
+// ==========================================
+enum AppMode {
+  MODE_BOOT,
+  MODE_MENU,
+  MODE_GAME,
+  MODE_STOPWATCH,
+  MODE_NRF24
+};
+
+AppMode currentMode = MODE_BOOT;
+bool showMiniTable = false; // Chỉ bật được ở MODE_MENU
+
+// ==========================================
+// 3. BITMAPS (LOGO, HẠT NHÂN, KHỦNG LONG)
+// ==========================================
+const uint8_t android_logo_bmp[] PROGMEM = {
+  0x00, 0x10, 0x08, 0x00, 0x00, 0x28, 0x14, 0x00, 0x00, 0x50, 0x0a, 0x00, 0x00, 0xa0, 0x05, 0x00,
+  0x01, 0xf0, 0x0f, 0x80, 0x07, 0xff, 0xff, 0xe0, 0x0f, 0xff, 0xff, 0xf0, 0x1e, 0x3c, 0x3c, 0x78,
+  0x1e, 0x3c, 0x3c, 0x78, 0x3f, 0xff, 0xff, 0xfc, 0x3f, 0xff, 0xff, 0xfc, 0x00, 0x00, 0x00, 0x00,
+  0x1c, 0x7f, 0xfe, 0x38, 0x3e, 0x7f, 0xfe, 0x7c, 0x3e, 0x7f, 0xfe, 0x7c, 0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c, 0x3e, 0x7f, 0xfe, 0x7c, 0x3e, 0x7f, 0xfe, 0x7c, 0x3e, 0x7f, 0xfe, 0x7c,
+  0x3e, 0x7f, 0xfe, 0x7c, 0x1c, 0x7f, 0xfe, 0x38, 0x00, 0x7f, 0xfe, 0x00, 0x00, 0x3f, 0xfc, 0x00,
+  0x00, 0x1e, 0x78, 0x00, 0x00, 0x1e, 0x78, 0x00, 0x00, 0x1e, 0x78, 0x00, 0x00, 0x1e, 0x78, 0x00,
+  0x00, 0x0c, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+const uint8_t atom_bmp[] PROGMEM = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xc0, 0x00, 0x00,
+  0x00, 0x00, 0x0f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x38, 0x00, 0x00,
+  0x00, 0x00, 0x38, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x30, 0x0c, 0x00, 0x00,
+  0x00, 0x00, 0x70, 0x0e, 0x00, 0x00, 0x00, 0x01, 0x60, 0x06, 0x80, 0x00,
+  0x00, 0x03, 0xc0, 0x03, 0xc0, 0x00, 0x00, 0x07, 0x80, 0x01, 0xe0, 0x00,
+  0x00, 0x0e, 0x00, 0x00, 0x70, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x38, 0x00,
+  0x00, 0x38, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x70, 0x01, 0x80, 0x0e, 0x00,
+  0x00, 0xe0, 0x07, 0xe0, 0x07, 0x00, 0x01, 0xc0, 0x0f, 0xf0, 0x03, 0x80,
+  0x03, 0x80, 0x1f, 0xf8, 0x01, 0xc0, 0x07, 0x00, 0x3f, 0xfc, 0x00, 0xe0,
+  0x0e, 0x00, 0x3f, 0xfc, 0x00, 0x70, 0x1c, 0x00, 0x3f, 0xfc, 0x00, 0x38,
+  0x38, 0x00, 0x3f, 0xfc, 0x00, 0x1c, 0x70, 0x00, 0x1f, 0xf8, 0x00, 0x0e,
+  0xe0, 0x00, 0x0f, 0xf0, 0x00, 0x07, 0xc0, 0x00, 0x07, 0xe0, 0x00, 0x03,
+  0xc0, 0x00, 0x07, 0xe0, 0x00, 0x03, 0xe0, 0x00, 0x0f, 0xf0, 0x00, 0x07,
+  0x70, 0x00, 0x1f, 0xf8, 0x00, 0x0e, 0x38, 0x00, 0x3f, 0xfc, 0x00, 0x1c,
+  0x1c, 0x00, 0x3f, 0xfc, 0x00, 0x38, 0x0e, 0x00, 0x3f, 0xfc, 0x00, 0x70,
+  0x07, 0x00, 0x3f, 0xfc, 0x00, 0xe0, 0x03, 0x80, 0x1f, 0xf8, 0x01, 0xc0,
+  0x01, 0xc0, 0x0f, 0xf0, 0x03, 0x80, 0x00, 0xe0, 0x07, 0xe0, 0x07, 0x00,
+  0x00, 0x70, 0x01, 0x80, 0x0e, 0x00, 0x00, 0x38, 0x00, 0x00, 0x1c, 0x00,
+  0x00, 0x1c, 0x00, 0x00, 0x38, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x70, 0x00,
+  0x00, 0x07, 0x80, 0x01, 0xe0, 0x00, 0x00, 0x03, 0xc0, 0x03, 0xc0, 0x00,
+  0x00, 0x01, 0x60, 0x06, 0x80, 0x00, 0x00, 0x00, 0x70, 0x0e, 0x00, 0x00,
+  0x00, 0x00, 0x30, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x38, 0x1c, 0x00, 0x00,
+  0x00, 0x00, 0x1c, 0x38, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xf0, 0x00, 0x00,
+  0x00, 0x00, 0x03, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+const uint8_t dino_bmp[] PROGMEM = {
+  0x00, 0x00, 0x80, 0x7f, 0x80, 0xb7, 0x80, 0xff, 0x80, 0xff, 0x80, 0x07, 0x00, 0x1f, 0xf0, 0x3f,
+  0xf0, 0x3f, 0xf0, 0x1f, 0xe0, 0x0f, 0xc0, 0x07, 0x80, 0x05, 0x80, 0x04, 0x00, 0x0c, 0x00, 0x08
+};
+
+const uint8_t cactus_bmp[] PROGMEM = {
+  0x06, 0x00, 0x0d, 0x80, 0x0d, 0x80, 0x6d, 0xb0, 0x6d, 0xb0, 0x6d, 0xb0, 0x7f, 0xf0, 0x0d, 0x80,
+  0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80, 0x0d, 0x80
+};
+
+// ==========================================
+// 4. BIẾN LOG NRF24, ĐỒNG HỒ & GAME
+// ==========================================
+byte nrf_i = 45, ptr_hop = 0;
+byte hopping_channel[] = {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80, 82, 84, 86};
+
+#define MAX_NRF_LOGS 30
+char nrfLogHistory[MAX_NRF_LOGS][28];
+int nrfLogTotal = 0;
+int nrfScrollPos = 0; // Vị trí cuộn dòng
+bool nrfActive = false; // Mặc định vào NRF24 sẽ PAUSED (chưa hoạt động)
+
+void pushNrfLog(const char* msg) {
+  if (nrfLogTotal < MAX_NRF_LOGS) {
+    strncpy(nrfLogHistory[nrfLogTotal], msg, 27);
+    nrfLogHistory[nrfLogTotal][27] = '\0';
+    nrfLogTotal++;
+  } else {
+    for (int i = 0; i < MAX_NRF_LOGS - 1; i++) {
+      strcpy(nrfLogHistory[i], nrfLogHistory[i + 1]);
+    }
+    strncpy(nrfLogHistory[MAX_NRF_LOGS - 1], msg, 27);
+    nrfLogHistory[MAX_NRF_LOGS - 1][27] = '\0';
+  }
+
+  // Khi NRF24 đang tự động chạy, màn hình sẽ tự cuộn xuống log mới nhất
+  if (nrfActive) {
+    if (nrfLogTotal > 4) nrfScrollPos = nrfLogTotal - 4;
+    else nrfScrollPos = 0;
+  }
+}
+
+// BỘ ĐẾM THỜI GIAN TOÀN CỤC (STOPWATCH)
+unsigned long accumulatedTime = 0;
+unsigned long timerStartMark = 0;
+bool timerRunning = false;
+char timerStr[16] = "00:00:00:0";
+
+// BỘ ĐẾM THỜI GIAN RIÊNG CHO GAME
+unsigned long gameStartTime = 0;
+unsigned long gamePlayTime = 0;
+char gameTimerStr[16] = "00:00:0";
+
+const int GROUND_Y = 46;
+int dinoY = GROUND_Y;
+float dinoVel = 0;
+bool isJumping = false;
+float cactusX = 128;
+const float FIXED_SPEED = 3.0; 
+int score = 0;
+bool gameOver = false;
+
+// ==========================================
+// 5. CÁC HÀM XỬ LÝ
+// ==========================================
+void nrfSPIInit() {
+  fspi.begin(SPI_SCK, SPI_MISO, SPI_MOSI, NRF_CSN_PIN);
+  if (radio.begin(&fspi)) {
+    radio.setAutoAck(false);
+    radio.stopListening();
+    radio.setRetries(0, 0);
+    radio.setPayloadSize(31);
+    radio.setAddressWidth(4);
+    radio.setPALevel(RF24_PA_MAX, true);
+    radio.setDataRate(RF24_2MBPS);
+    radio.setCRCLength(RF24_CRC_DISABLED);
+    radio.startConstCarrier(RF24_PA_MAX, nrf_i);
+  }
+}
+
+void startOrPauseTimer() {
+  if (timerRunning) {
+    accumulatedTime += (millis() - timerStartMark);
+    timerRunning = false;
+  } else {
+    timerStartMark = millis();
+    timerRunning = true;
+  }
+}
+
+void resetTimer() {
+  accumulatedTime = 0;
+  timerStartMark = millis();
+}
+
+void updateTimerString() {
+  unsigned long currentElapsed = accumulatedTime;
+  if (timerRunning) currentElapsed += (millis() - timerStartMark);
+
+  unsigned long tenths = (currentElapsed / 100) % 10;
+  unsigned long totalSecs = currentElapsed / 1000;
+  unsigned long secs = totalSecs % 60;
+  unsigned long totalMins = totalSecs / 60;
+  unsigned long mins = totalMins % 60;
+  unsigned long hours = totalMins / 60;
+
+  snprintf(timerStr, sizeof(timerStr), "%02lu:%02lu:%02lu:%1lu", hours, mins, secs, tenths);
+}
+
+void updateGameTimerString() {
+  unsigned long tenths = (gamePlayTime / 100) % 10;
+  unsigned long totalSecs = gamePlayTime / 1000;
+  unsigned long secs = totalSecs % 60;
+  unsigned long mins = (totalSecs / 60) % 60;
+
+  snprintf(gameTimerStr, sizeof(gameTimerStr), "%02lu:%02lu:%1lu", mins, secs, tenths);
+}
+
+void resetGame() {
+  dinoY = GROUND_Y;
+  dinoVel = 0;
+  isJumping = false;
+  cactusX = 128;
+  score = 0;
+  gameOver = false;
+  gameStartTime = millis();
+  gamePlayTime = 0;
+  updateGameTimerString();
+}
+
+void showAtomAnimation() {
+  u8g2.clearBuffer();
+  u8g2.drawXBMP(40, 4, 48, 48, atom_bmp);
+  u8g2.setFont(u8g2_font_micro_tr);
+  u8g2.drawStr(32, 60, "NUCLEAR CORE TX");
+  u8g2.sendBuffer();
+  delay(1500);
+}
+
+void drawMiniTableOverlay() {
+  u8g2.setDrawColor(0); u8g2.drawBox(8, 4, 112, 56);
+  u8g2.setDrawColor(1); u8g2.drawFrame(8, 4, 112, 56);
+
+  u8g2.setFont(u8g2_font_micro_tr);
+  u8g2.drawStr(28, 12, "BANG CHE DO NUT");
+  u8g2.drawHLine(8, 15, 112);
+  u8g2.drawHLine(8, 28, 112);
+  u8g2.drawHLine(8, 41, 112);
+  u8g2.drawVLine(50, 15, 45);
+
+  u8g2.drawStr(12, 24, "Giu N4 1s/3s"); u8g2.drawStr(54, 24, "Game / NRF");
+  u8g2.drawStr(12, 37, "Giu N5 1s/2s"); u8g2.drawStr(54, 37, "Timer / Home");
+  u8g2.drawStr(12, 50, "Loading%"); u8g2.drawStr(54, 50, "Real-time%");
+}
+
+// ==========================================
+// 6. XỬ LÝ NÚT BẤM
+// ==========================================
+void handleShortPress(uint8_t btnId) {
+  if (btnId == 4) {
+    if (currentMode == MODE_GAME) {
+      if (!isJumping && !gameOver) {
+        dinoVel = -5.2;
+        isJumping = true;
+      } else if (gameOver) {
+        resetGame();
+      }
+    } else if (currentMode == MODE_STOPWATCH) {
+      startOrPauseTimer();
+    } else if (currentMode == MODE_NRF24) {
+      // NÚT 4: KÉO DANH SÁCH LOG XUỐNG
+      int maxScroll = (nrfLogTotal > 4) ? (nrfLogTotal - 4) : 0;
+      if (nrfScrollPos < maxScroll) {
+        nrfScrollPos++;
+      }
+    }
+  } else if (btnId == 5) {
+    if (currentMode == MODE_GAME) {
+      if (gameOver) resetGame();
+    } else if (currentMode == MODE_STOPWATCH) {
+      resetTimer();
+    } else if (currentMode == MODE_NRF24) {
+      // NÚT 5: KÉO DANH SÁCH LOG LÊN
+      if (nrfScrollPos > 0) {
+        nrfScrollPos--;
+      }
+    } else if (currentMode == MODE_MENU) {
+      // BẢNG HƯỚNG DẪN CHỈ BẬT ĐƯỢC Ở HÌNH NỀN (MENU)
+      showMiniTable = !showMiniTable;
+    }
+  }
+}
+
+void checkAndProcessButtons() {
+  uint8_t activeBtn = 0;
+  if (digitalRead(BTN_1_PIN) == LOW) activeBtn = 4;
+  else if (digitalRead(BTN_2_PIN) == LOW) activeBtn = 5;
+
+  if (activeBtn == 0) return;
+
+  uint8_t pin = (activeBtn == 4) ? BTN_1_PIN : BTN_2_PIN;
+  delay(25); 
+  if (digitalRead(pin) != LOW) return;
+
+  unsigned long start = millis();
+
+  while (digitalRead(pin) == LOW) {
+    unsigned long duration = millis() - start;
+
+    if (duration > 180) {
+      int percent = map(duration, 0, 3000, 0, 100);
+      if (percent > 100) percent = 100;
+
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_micro_tr);
+      u8g2.drawStr(42, 12, "HOLD LOADING");
+
+      u8g2.drawFrame(12, 22, 104, 16);
+      u8g2.drawFrame(10, 20, 108, 20);
+      u8g2.drawHLine(14, 16, 100);
+      u8g2.drawHLine(14, 44, 100);
+
+      int fillW = map(percent, 0, 100, 0, 100);
+      u8g2.drawBox(14, 24, fillW, 12);
+
+      u8g2.setCursor(8, 58); u8g2.print(percent); u8g2.print("%");
+      u8g2.setCursor(98, 58); u8g2.print(percent); u8g2.print("%");
+
+      u8g2.setCursor(34, 58);
+      if (activeBtn == 4) {
+        if (currentMode == MODE_NRF24) {
+          if (percent >= 20 && percent <= 45) {
+            u8g2.print(nrfActive ? "> TAM NGUNG <" : "> TIEP TUC <");
+          } else {
+            u8g2.print("GIU DE CHUYEN");
+          }
+        } else {
+          if (percent < 20) u8g2.print("GIU TIEP...");
+          else if (percent >= 20 && percent <= 45) u8g2.print("> VAO GAME <");
+          else if (percent > 45 && percent < 70) u8g2.print("GIU DEN 70%");
+          else u8g2.print("> NRF24 ATOM <");
+        }
+      } else if (activeBtn == 5) {
+        if (percent < 20) u8g2.print("GIU TIEP...");
+        else if (percent >= 20 && percent <= 45) u8g2.print("> DONG HO <");
+        else if (percent >= 50 && percent <= 75) u8g2.print("> TRANG CHU <");
+        else u8g2.print("THA TAY RA");
+      }
+
+      u8g2.sendBuffer();
+    }
+    delay(15);
+  }
+
+  unsigned long totalHold = millis() - start;
+
+  if (totalHold < 350) {
+    handleShortPress(activeBtn);
+  } else {
+    int finalPercent = map(totalHold, 0, 3000, 0, 100);
+    if (finalPercent > 100) finalPercent = 100;
+
+    if (activeBtn == 4) {
+      if (currentMode == MODE_NRF24) {
+        // TRONG NRF24: GIỮ NÚT 4 KHOẢNG 1S ĐỂ TIẾP TỤC / TẠM NGỪNG
+        if (finalPercent >= 20 && finalPercent <= 50) {
+          nrfActive = !nrfActive;
+          if (nrfActive) pushNrfLog("> RESUMED SWEEPING");
+          else pushNrfLog("> PAUSED SWEEPING");
+        }
+      } else {
+        if (finalPercent >= 20 && finalPercent <= 45) {
+          showMiniTable = false;
+          currentMode = MODE_GAME;
+          resetGame();
+        } else if (finalPercent >= 70) {
+          showMiniTable = false;
+          showAtomAnimation();
+          currentMode = MODE_NRF24;
+          nrfActive = false; // VÀO CHẾ ĐỘ NRF24 SẼ CHƯA HOẠT ĐỘNG NGAY
+          pushNrfLog("> NRF24 Ready. Standby.");
+        }
+      }
+    } else if (activeBtn == 5) {
+      if (finalPercent >= 20 && finalPercent <= 45) {
+        showMiniTable = false;
+        currentMode = MODE_STOPWATCH;
+      } else if (finalPercent >= 50 && finalPercent <= 75) {
+        showMiniTable = false;
+        currentMode = MODE_MENU;
+      }
+    }
+  }
+}
+
+// ==========================================
+// 7. SETUP & BOOT ANIMATION
+// ==========================================
+void runBootAnimation() {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  u8g2.drawStr(10, 40, "REDMAGIC");
+  u8g2.sendBuffer();
+  delay(1200);
+
+  u8g2.clearBuffer();
+  u8g2.drawXBMP(12, 16, 32, 32, android_logo_bmp);
+  u8g2.setFont(u8g2_font_7x14_tr);
+  u8g2.drawStr(52, 32, "REDMAGIC");
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(52, 44, "Android Ed.");
+  u8g2.sendBuffer();
+  delay(1500);
+
+  currentMode = MODE_MENU;
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BTN_1_PIN, INPUT_PULLUP);
+  pinMode(BTN_2_PIN, INPUT_PULLUP);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  u8g2.begin();
+  u8g2.setBusClock(800000);
+
+  nrfSPIInit();
+  runBootAnimation();
+
+  pushNrfLog("> System Initialized");
+}
+
+// ==========================================
+// 8. LOOP CHÍNH
+// ==========================================
+void loop() {
+  checkAndProcessButtons();
+  updateTimerString();
+
+  // --- 1. MÀN HÌNH MENU (HÌNH NỀN CHÍNH) ---
+  if (currentMode == MODE_MENU) {
+    u8g2.clearBuffer();
+    u8g2.drawXBMP(6, 12, 32, 32, android_logo_bmp);
+    
+    u8g2.setFont(u8g2_font_7x14_tr);
+    u8g2.drawStr(44, 18, "REDMAGIC");
+
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(44, 30, "Giu N4 1s: Vao Game");
+    u8g2.drawStr(44, 40, "Giu N4 3s: Vao NRF24");
+    u8g2.drawStr(44, 50, "Giu N5 1s: Vao Timer");
+
+    u8g2.drawHLine(0, 63, 128);
+
+    // CHỈ VẼ BẢNG HƯỚNG DẪN Ở MÀN HÌNH MENU
+    if (showMiniTable) drawMiniTableOverlay();
+
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // --- 2. CHẾ ĐỘ NRF24 SWEEPER ---
+  if (currentMode == MODE_NRF24) {
+    if (nrfActive) {
+      ptr_hop = (ptr_hop + 1) % sizeof(hopping_channel);
+      byte currentChannel = hopping_channel[ptr_hop];
+      radio.setChannel(currentChannel);
+
+      char logBuf[28];
+      snprintf(logBuf, sizeof(logBuf), "> CH:%02d | %dMHz [TX]", currentChannel, 2400 + currentChannel);
+      pushNrfLog(logBuf);
+    }
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_micro_tr);
+    
+    if (nrfActive) {
+      u8g2.drawStr(0, 7, "NRF24 ATOMIC: [RUNNING]");
+    } else {
+      u8g2.drawStr(0, 7, "NRF24 ATOMIC: [PAUSED]");
+    }
+    u8g2.drawHLine(0, 9, 128);
+
+    // Hiển thị các dòng Log theo vị trí cuộn (nrfScrollPos)
+    u8g2.setFont(u8g2_font_5x7_tr);
+    for (int i = 0; i < 4; i++) {
+      int lineIdx = nrfScrollPos + i;
+      if (lineIdx < nrfLogTotal) {
+        u8g2.drawStr(0, 20 + (i * 10), nrfLogHistory[lineIdx]);
+      }
+    }
+
+    u8g2.drawHLine(0, 53, 128);
+    u8g2.setFont(u8g2_font_micro_tr);
+    u8g2.drawStr(0, 62, "N4 1s: Run/Pause | N4/N5: Scroll");
+
+    u8g2.sendBuffer();
+    delay(nrfActive ? 20 : 50);
+    return;
+  }
+
+  // --- 3. CHẾ ĐỘ BẤM GIỜ (STOPWATCH) ---
+  if (currentMode == MODE_STOPWATCH) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(24, 12, "REDMAGIC TIMER");
+
+    u8g2.setFont(u8g2_font_10x20_tr);
+    u8g2.setCursor(14, 38);
+    u8g2.print(timerStr);
+
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.setCursor(20, 52);
+    if (timerRunning) u8g2.print("[ DANG CHAY... ]");
+    else u8g2.print("[ TAM DUNG ]");
+
+    u8g2.drawStr(0, 64, "N4:Chay/Dung | N5:Reset");
+
+    u8g2.sendBuffer();
+    return;
+  }
+
+  // --- 4. CHẾ ĐỘ GAME KHỦNG LONG ---
+  if (currentMode == MODE_GAME) {
+    if (gameOver) {
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(32, 16, "GAME OVER");
+      
+      u8g2.setCursor(10, 36); u8g2.print("Diem dat duoc: "); u8g2.print(score);
+      u8g2.setCursor(10, 52); u8g2.print("Thoi gian: "); u8g2.print(gameTimerStr);
+      
+      u8g2.sendBuffer();
+      return;
+    }
+
+    gamePlayTime = millis() - gameStartTime;
+    updateGameTimerString();
+
+    dinoY += dinoVel;
+    dinoVel += 0.45;
+    if (dinoY >= GROUND_Y) {
+      dinoY = GROUND_Y;
+      isJumping = false;
+    }
+
+    cactusX -= FIXED_SPEED;
+    if (cactusX < -12) {
+      cactusX = 128;
+      score++;
+    }
+
+    if (10 + 12 > cactusX && 10 < cactusX + 10 && dinoY + 14 > 48) {
+      gameOver = true;
+    }
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_micro_tr);
+    u8g2.drawStr(0, 8, "REDMAGIC");
+    u8g2.setCursor(48, 8); u8g2.print("S:"); u8g2.print(score);
+    u8g2.setCursor(85, 8); u8g2.print(gameTimerStr);
+
+    u8g2.drawHLine(0, 10, 128);
+    u8g2.drawHLine(0, 62, 128);
+    u8g2.drawXBMP(10, dinoY, 16, 16, dino_bmp);
+    u8g2.drawXBMP((int)cactusX, 48, 12, 14, cactus_bmp);
+
+    u8g2.sendBuffer();
+    delay(10);
+  }
+}
